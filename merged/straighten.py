@@ -1,6 +1,12 @@
 #!/usr/bin/env python
 #coding: utf-8
 
+import warnings
+
+with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+warnings.simplefilter("ignore")
+
 import os
 import optparse
 import copy
@@ -15,6 +21,7 @@ from scipy.interpolate import *
 from scipy.spatial import distance_matrix
 from skimage.feature import hessian_matrix, hessian_matrix_eigvals
 from skimage.filters import hessian, laplace
+from sklearn.cluster import KMeans
 from scipy.misc import *
 from pyfftw.builders import *
 import pyfftw
@@ -26,29 +33,35 @@ ALLOWED_ANGLE = 45
 BSIZE = 1.5
 
 def setupParserOptions():
-    parser = optparse.OptionParser(usage="Usage: %prog <filtered volume> <raw volume> [options]")
-    parser.add_option('--thres', dest='thres', action='store', type='float', default=0.05, help='thresholding value to detect filaments')
-    parser.add_option('--r_mem', dest='r_mem', action='store', type='int', default=30, help='radius of membrane')
-    parser.add_option('--largeness', dest='largeness', action='store', type='int', default=10, help='the minimal value of the area of projected filaments')
-    parser.add_option('--average', dest='average', action='store', type='int', default=40, help='how many images are averaged to calculate the center of a filament cross section?')
-    parser.add_option('--thickness', dest='thickness', action='store', type='int', default=25, help='thickness of y-slices')
-    parser.add_option('--overlap', dest='overlap', action='store', type='int', default=10, help='overlap of averaged slices')
-    parser.add_option('--cutoff_vol_top', dest='cutoff_vol_top', action='store', type='int', default=0, help='length of volume cut-off from the top')
-    parser.add_option('--cutoff_vol_bottom', dest='cutoff_vol_bottom', action='store', type='int', default=0, help='length of volume cut-off from the bottom')
-    parser.add_option('--r_actin', dest='r_actin',action='store', type='float', default=1.8, help='diameter of actin')
-    parser.add_option('--thres_cutoff_mask', dest='thres_cutoff_mask', action='store', type='float', default=3.8, help='threshold of cut-off mask')
-    parser.add_option('--thres_dis', dest='thres_dis', action='store', type='float', default=4, help='separated actins within distance=r_actin*thres_dis are be connected as one actin')
-    parser.add_option('--patch_size', dest='patch_size', action='store', type='int', default=5, help='patch size')
-    parser.add_option('--continue', dest='continue', action='store', type='string', default=None, help='continue from an already straightened volume')
-    options, args = parser.parse_args()
-    if len(args) > 2: parser.error("Unknown command-line options: %s"%str(args))
-    if len(sys.argv) < 3:
-        parser.print_help()
-        sys.exit()
-    params = {}
-    for i in parser.option_list:
-        if isinstance(i.dest, str): params[i.dest] = getattr(options, i.dest)
-    return params
+        parser = optparse.OptionParser(usage="Usage: %prog <filtered volume> <raw volume> [options]")
+        parser.add_option('--apix', dest='apix', action='store', type='float', default=4.2625, help='pixel size of an UNBINNED tomogram')
+        parser.add_option('--bin', dest='bin', action='store', type='int', default=4, help='binning factor')
+        parser.add_option('--rise', dest='rise', action='store', type='int', default=27.8, help='rise of the filament in Angstroms')
+        parser.add_option('--thres', dest='thres', action='store', type='float', default=0.05, help='thresholding value to detect filaments')
+        parser.add_option('--r_mem', dest='r_mem', action='store', type='int', default=27, help='radius of membrane')
+        parser.add_option('--largeness', dest='largeness', action='store', type='int', default=10, help='the minimal value of the area of projected filaments')
+        parser.add_option('--average', dest='average', action='store', type='int', default=40, help='how many images are averaged to calculate the center of a filament cross section?')
+        parser.add_option('--thickness', dest='thickness', action='store', type='int', default=25, help='thickness of y-slices')
+        parser.add_option('--overlap', dest='overlap', action='store', type='int', default=10, help='overlap of averaged slices')
+        parser.add_option('--cutoff_vol_top', dest='cutoff_vol_top', action='store', type='int', default=0, help='length of volume cut-off from the top')
+        parser.add_option('--cutoff_vol_bottom', dest='cutoff_vol_bottom', action='store', type='int', default=0, help='length of volume cut-off from the bottom')
+        parser.add_option('--r_actin', dest='r_actin',action='store', type='float', default=1.8, help='diameter of actin')
+        parser.add_option('--thres_cutoff_mask', dest='thres_cutoff_mask', action='store', type='float', default=3.8, help='threshold of cut-off mask')
+        parser.add_option('--thres_dis', dest='thres_dis', action='store', type='float', default=3, help='separated blobs within in-plane distance r_actin*thres_dis be connected as one actin')
+        parser.add_option('--patch_size', dest='patch_size', action='store', type='int', default=5, help='patch size')
+        parser.add_option('--asym_unit_step', dest='asym_unit_step', action='store', type='int', default=6, help='the interval to segment particles (expresed in the number of asymmetrical units)')
+        parser.add_option('--classify', dest='classify', action='store', type='string', default='all', help='expressed in the format of "K-k", where K is the number of class and k is the class-id to be saved')
+        parser.add_option('--continue', dest='continue', action='store', type='string', default=None, help='continue from an already straightened volume')
+        parser.add_option('--debug', dest='debug', action='store_true', default=False, help='debug mode')
+        options, args = parser.parse_args()
+        if len(args) > 2: parser.error("Unknown command-line options: %s"%str(args))
+        if len(sys.argv) < 3:
+                parser.print_help()
+                sys.exit()
+        params = {}
+        for i in parser.option_list:
+                if isinstance(i.dest, str): params[i.dest] = getattr(options, i.dest)
+        return params
 
 def convolve2d(A, B, mode="same"):
         # determine output array shape (Y, X) and calculation array shape (L_calc, M_calc)
@@ -242,42 +255,46 @@ def find_filament_axis(proj, meij, vect, outer_radius):
 
 def find_3D_axis(data, twod_axes, outer_radius, ave=10):
         print "Finding the axis for each object in the volume data ..."
-        rad = int(outer_radius*2)
+        rad = int(outer_radius)+15
         axes = []
+        x_size = data.shape[1]
+        try: os.remove("patch.mrcs")
+        except: pass
+        try: os.remove("cor.mrcs")
+        except: pass
         for i, twod_axis in enumerate(twod_axes):
                 print " -> calculating for object #%d ..."%(i+1)
                 centers = []
                 y_positions, z_positions = twod_axis
-                #f = open("test.txt", "w")
                 for j in range(len(y_positions)/ave):
                         ys = y_positions[j*ave:(j+1)*ave]
                         zs = z_positions[j*ave:(j+1)*ave]
                         z = int(zs.mean())
                         if z-rad < 0 or z+rad < data.shape[1]: continue
-                        patch = data[ys[0]:ys[-1]+1, :, z-rad:z+rad].sum(axis=0)
-                        patch = cutoff_noise(patch, c_value=5, verbose=False)
-                        center_x, center_z = find_center(patch, outer_radius/2)
+                        patch = data[ys[0]:ys[-1]+1, :, z-rad:z+rad]
+                        patch = cutoff_noise(patch, c_value=3, verbose=False).sum(axis=0)
+                        patch = patch - patch.mean()
+                        patch[patch < 0] = 0
+                        EMNumPy.numpy2em(patch).write_image("patch.mrcs", -1)
+                        center_x, center_z, ccc = find_center(patch, outer_radius/2)
                         center_z = z-rad+center_z
                         center_y = ys.mean()
                         if outer_radius*BSIZE < center_x and center_x < data.shape[1] - outer_radius*BSIZE:
                                 centers.append((center_x, center_y, center_z))
-                                #f.write("%d %d %d\n"%(center_z, center_x, center_y))
-                #f.close()
                 if len(centers) < 3: 
-                        print " -> discarding this object (#%d), because the majority of points are too close to edges!"%(i+1)
-                else:
-                        centers = np.array(centers).transpose()
-                        axes.append(centers)
+                        print " -> discarding this object (#%d), because the majority of points are too close to the edges!"%(i+1)
+                        continue
+                centers = np.array(centers)
+                centers = np.array(centers).transpose()
+                axes.append(centers)
         print " -> complete!"
         return axes
 
 def find_center(data, limit):
-        data -= data.min()
-        thres = data.mean() - data.std()
-        data[data < thres] = thres
         data -= data.mean()
         data_inv = data[::-1, ::-1]
         cor = correlate2d(data, data_inv, mode="same")
+        EMNumPy.numpy2em(cor).write_image("cor.mrcs", -1)
         cor = cor[int(cor.shape[0]/2-limit*2):int(cor.shape[0]/2+limit*2), int(cor.shape[1]/2-limit*2):int(cor.shape[1]/2+limit*2)]
         max_pos = np.argmax(cor)
         cor_Y, cor_X = cor.shape
@@ -286,7 +303,7 @@ def find_center(data, limit):
         center_y = data.shape[0]/2 + dy
         center_x = data.shape[1]/2 + dx
         plt.imshow(data)
-        return center_y, center_x
+        return center_y, center_x, cor.max()
 
 def create_straight_volume(data, axes, outer_radius):
         vols = []
@@ -425,7 +442,10 @@ def connect_blobs(centers, r_actin, thres_dis, slices_z, size):
                 connection_distance = np.sort(dist, axis=1)[:, 0]
                 connect_from = [-1]*len(centers[i+1]) # [0, 2, 1, 3] means #0->#0, #2->#1, #1->#2, and #3->#3
                 for connect_from_ind, connect_to_ind in enumerate(connect_to):
-                        if connection_distance[connect_from_ind] > r_actin * thres_dis: continue
+                        if connection_distance[connect_from_ind] > r_actin * thres_dis:
+                                # if the closest blob is too far
+                                connect_to[connect_from_ind] = -1
+                                continue
                         if connect_from[connect_to_ind] != -1 and connection_distance[connect_from_ind] < connection_distance[connect_from[connect_to_ind]]:
                                 # if already connected but closer than the previous one
                                 connect_to[connect_from[connect_to_ind]] = -1
@@ -434,7 +454,7 @@ def connect_blobs(centers, r_actin, thres_dis, slices_z, size):
                                 connect_from[connect_to_ind] = connect_from_ind
                 for j, line in enumerate(actin_censl):
                         if line[-1][1] == i:
-                                if connect_to[line[-1][0]] != -1: # if a blob which can be connected to exists
+                                if connect_to[line[-1][0]] != -1: # if a blob that can be connected to exists
                                         actin_censl[j].append([connect_to[line[-1][0]], i+1])
                 # for the blobs to which no blob could be connected
                 for connect_to_ind, connect_from_ind in enumerate(connect_from):
@@ -448,8 +468,8 @@ def connect_blobs(centers, r_actin, thres_dis, slices_z, size):
         actin_stop_sl = np.array([[0, line[-1][1]] for line in actin_censl])
         dist_stop_start_sl = distance_matrix(actin_stop_sl, actin_start_sl)
         dist_stop_start_xy = distance_matrix(actin_stop_xy, actin_start_xy)
-        mask_sl = (2 <= dist_stop_start_sl) * (dist_stop_start_sl <= 3)
-        mask_xy = dist_stop_start_xy <= r_actin * (thres_dis-1)
+        mask_sl = (2 <= dist_stop_start_sl) * (dist_stop_start_sl <= 4)
+        mask_xy = dist_stop_start_xy <= r_actin * thres_dis
         y, x = np.meshgrid(np.arange(mask_sl.shape[0]), np.arange(mask_sl.shape[1]))
         mask_avoid_doublecount = y > x
         mask = mask_sl * mask_xy * mask_avoid_doublecount
@@ -505,41 +525,145 @@ def track(filename, params):
         print " -> complete!"
 
         actin_censl, actin_xysl, actin_xyz = connect_blobs(centers_log, params['r_actin'], params['thres_dis'], slice_z_coords, size)
-        
+        if params["debug"]:
+                fall = open("all.txt", "w")
+                for key in actin_xysl.keys():
+                        f = open('xysl_vol%d.txt'%key, 'w')
+                        for position in actin_xysl[key]:
+                                f.write('%f %f %d\n'%(position[1], position[0], position[2]))
+                                fall.write('%f %f %d\n'%(position[1], position[0], position[2]))
+                        f.close()
+                fall.close()
         return actin_xyz
 
-def save_coordinates(xyz, centers, volname):
+def classify_filaments(xyz, K, k, params):
+        print "Classifying the filaments according to the distance from the center ..."
+        filament_offaxis_distance = []
+        for filament_id, filament_coords in xyz.items():
+                dist_from_center = np.array([np.sqrt(np.sum(np.array(coord[:2])**2)) for coord in filament_coords])
+                dist_from_center = np.sum(dist_from_center)/dist_from_center.size
+                filament_offaxis_distance.append(dist_from_center)
+        filament_offaxis_distance = np.array(filament_offaxis_distance)
+        npdata = np.array([[0]*len(filament_offaxis_distance), filament_offaxis_distance])
+        npdata = npdata.transpose()
+        pred = KMeans(n_clusters=K, init='k-means++', n_init=10, random_state=0).fit_predict(npdata)
+        for cls, point in zip(pred, npdata):
+                if cls == 1:
+                        plt.scatter(0,point[1],color='r')
+                elif cls == 2:
+                        plt.scatter(0,point[1],color='g')
+                else:
+                        plt.scatter(0,point[1],color='b')
+        plt.savefig("cls.png")
+        res = []
+        for i in range(K): res.append([])
+        i = 0
+        for cls, point in zip(pred, npdata):
+                res[cls].append([point[1], i])
+                i += 1
+        res = sorted(res, key=lambda x:x[0][0])
+        res = np.array(res[k])
+        save_indices = res[:, 1]
+        save_indices = map(int, save_indices)
+        print " -> filament %s will be saved ..."%(",".join(map(str, save_indices)))
+        saved = {}
+        for save_index in save_indices:
+                saved[save_index] = xyz[save_index]
+        print " -> complete!"
+        return saved
+
+def save_coordinates(xyz, centers, volname, params):
         # xyz -> {0: [[x00, y00, z00], [x01, y01, z01], ...]], 1:[[x10, y10, z10], [x11, y11, z11], ...]}
         # centers: [[X0, Y0, Z0], [X1, Y1, Z1], ...]
-        APIX = 17.05
-        step = 27.3 * 7 / APIX
+        print "Saving the results ..."
+        APIX = params["apix"]
+        BIN = params["bin"]
+        APIX *= BIN
+        step = params["rise"] * params["asym_unit_step"] / APIX
+        coords_all = []
+        yaxes_all = []
+        motl_all = []
+        xyz_global = copy.deepcopy(xyz)
         for filament_id, filament_coords in xyz.items():
                 dist_from_top = [0]
+                # estimate global coordinates in the tomogram volume
                 for i, coord in enumerate(filament_coords):
                         y, x, z = coord
                         X, Y, Z = centers[int(z)]
                         x_new, y_new, z_new = x+X, y+Y, Z
-                        xyz[filament_id][i] = [x_new, y_new, z_new]
+                        xyz_global[filament_id][i] = [x_new, y_new, z_new]
                         if i > 0: 
-                                x_prev, y_prev, z_prev = xyz[filament_id][i-1]
+                                x_prev, y_prev, z_prev = xyz_global[filament_id][i-1]
                                 dist_add = np.sqrt((x_new-x_prev)**2+(y_new-y_prev)**2+(z_new-z_prev)**2)
                                 dist_from_top.append(dist_from_top[-1]+dist_add)
                 total_length = dist_from_top[-1]
-                if total_length < step: continue
                 n_points = int(total_length / step)
+                if n_points <= 2: continue
                 points_xyz = []
                 slice_i = 0
-                f = open("%s.filament%d.coords.txt"%(volname, filament_id), "w")
+                #f = open("%s.filament%d.coords.txt"%(volname, filament_id), "w")
+                #fy = open("%s.filament%d_RotAxes.csv"%(volname, filament_id), "w")
+                #fm = open("%s.filament%d_RotAxes.csv"%(volname, filament_id), "w")
+                # determine output coordinates at regular intervals (=step) and y-axes of the particles
                 for i in range(n_points):
+                        # output coordinates
                         while not (dist_from_top[slice_i] <= i*step < dist_from_top[slice_i+1]):
                                 slice_i += 1
                         delta = dist_from_top[slice_i+1] - dist_from_top[slice_i]
-                        prev_coord = np.array(xyz[filament_id][slice_i])
-                        next_coord = np.array(xyz[filament_id][slice_i+1])
+                        prev_global_coord = np.array(xyz_global[filament_id][slice_i])
+                        next_global_coord = np.array(xyz_global[filament_id][slice_i+1])
                         l = i*step - dist_from_top[slice_i]
-                        coord = list(prev_coord + (next_coord-prev_coord) * l/delta)
-                        f.write(" ".join(map(str, coord))+"\n")
-                f.close()
+                        global_coord = prev_global_coord + (next_global_coord-prev_global_coord) * l/delta
+                        global_coord *= BIN # make sure to multiply binning factor to make the coordinates global
+                        coords_all.append(global_coord)
+                        #f.write(" ".join(map(str, global_coord))+"\n")
+                        if i > 0:
+                                # y-axes
+                                yaxis = global_coord - coords_all[-2]
+                                yaxes_all.append(yaxis)
+                                #fy.write(",".join(map(str, yaxis))+"\n")
+                                # initial motive list
+                                prev_local_coord = np.array(xyz[filament_id][slice_i])
+                                next_local_coord = np.array(xyz[filament_id][slice_i+1])
+                                local_coord = prev_local_coord + (next_local_coord-prev_local_coord) * l/delta
+                                y, x, z = local_coord
+                                xaxis_inplane = -np.array([x*100, y*100, 0])
+                                yaxis = np.array(yaxis)
+                                xaxis = xaxis_inplane - np.dot(xaxis_inplane, yaxis)/np.linalg.norm(yaxis)**2 * yaxis
+                                zaxis = np.cross(xaxis, yaxis)
+                                xaxis = xaxis / np.linalg.norm(xaxis)
+                                yaxis = yaxis / np.linalg.norm(yaxis)
+                                zaxis = zaxis / np.linalg.norm(zaxis)
+                                mat = np.array([xaxis, yaxis, zaxis])
+                                rot = Rotation.from_dcm(mat)
+                                motl = rot.as_euler("zyx")/np.pi*180
+                                motl_all.append(motl)
+                                #fm.write(",".join(map(str, motl))+"\n")
+                yaxes_all.append(yaxis)
+                motl_all.append(motl)
+                #fy.write(",".join(map(str, yaxis))+"\n")
+                #fm.write(",".join(map(str, motl))+"\n")
+                #f.close()
+                #fy.close()
+                #fm.close()
+        f_name = "%s.filament_%s.coords.txt"%(volname, params["classify"])
+        fy_name = "%s.filament_%s.RotAxes.txt"%(volname, params["classify"])
+        fm_name = "%s.filament_%s.SlicerAngles.txt"%(volname, params["classify"])
+        print " -> coordinates are written in %s"%f_name
+        print " -> RotAxes are written in %s"%fy_name
+        print " -> initial Slicer Angles are written in %s"%fm_name
+        f = open(f_name, "w")
+        fy = open(fy_name, "w")
+        fm = open(fm_name, "w")
+        print "Total number of points: %d"%(len(coords_all))
+        for i in range(len(coords_all)):
+                f.write(" ".join(map(str, coords_all[i]))+"\n")
+                fy.write(",".join(map(str, yaxes_all[i]))+"\n")
+                fm.write(",".join(map(str, motl_all[i]))+"\n")
+        f.close()
+        fy.close()
+        fm.close()
+        print " -> complete!"
 
 def straighten(lp_map_name, nlp_map_name, params):
         # constants
@@ -551,6 +675,7 @@ def straighten(lp_map_name, nlp_map_name, params):
         # cut-off noise and normalize
         proj = cutoff_noise(proj, c_value=3)
         proj = normalize(proj)
+        save("proj.mrc", proj)
         # meijering filter
         meij, vect = meijering(proj, outer_radius)
         # objects must not include near-edge regions
@@ -600,7 +725,12 @@ def main():
                 print "Tracking actins on vol #%d: %s"%(i, volnames[i])
                 xyz = track(volnames[i], params)
                 centers = [map(float, line.split()) for line in open(volnames[i]+".center.txt").readlines()]
-                save_coordinates(xyz, centers, volnames[i])
+                if params["classify"] == "all": saved = xyz
+                else:
+                        K, k = map(int, params["classify"].split("-"))
+                        saved = classify_filaments(xyz, K, k, params)
+                save_coordinates(saved, centers, volnames[i], params)
+                print
 
 if __name__ == "__main__":
         main()
