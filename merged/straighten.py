@@ -51,6 +51,7 @@ def setupParserOptions():
         parser.add_option('--patch_size', dest='patch_size', action='store', type='int', default=5, help='patch size')
         parser.add_option('--asym_unit_step', dest='asym_unit_step', action='store', type='int', default=6, help='the interval to segment particles (expresed in the number of asymmetrical units)')
         parser.add_option('--classify', dest='classify', action='store', type='string', default='all', help='expressed in the format of "K-k", where K is the number of class and k is the class-id to be saved')
+        parser.add_option('--polarity', dest='polarity', action='store', type='int', default=1, help='RotAxes will be saved as the difference vector from the present to the next particle multiplied by this polarity value')
         parser.add_option('--continue', dest='continue', action='store', type='string', default=None, help='continue from an already straightened volume')
         parser.add_option('--debug', dest='debug', action='store_true', default=False, help='debug mode')
         options, args = parser.parse_args()
@@ -460,7 +461,7 @@ def connect_blobs(centers, r_actin, thres_dis, slices_z, size):
                 for connect_to_ind, connect_from_ind in enumerate(connect_from):
                         if connect_from_ind == -1: actin_censl.append([[connect_to_ind, i+1]])
 
-        # if actin appeas in 2 or 3 slices ahead and it seems that both constitute the same filament, connect
+        # if a filament appeas in 2 or 3 slices ahead and it seems that both constitute the same filament, connect
         print " -> connecting separate short filaments into a long filament ..."
         actin_start_xy = np.array([centers[line[0][1]][line[0][0]] for line in actin_censl])
         actin_start_sl = np.array([[0, line[0][1]] for line in actin_censl])
@@ -601,10 +602,7 @@ def save_coordinates(xyz, centers, volname, params):
                 if n_points <= 2: continue
                 points_xyz = []
                 slice_i = 0
-                #f = open("%s.filament%d.coords.txt"%(volname, filament_id), "w")
-                #fy = open("%s.filament%d_RotAxes.csv"%(volname, filament_id), "w")
-                #fm = open("%s.filament%d_RotAxes.csv"%(volname, filament_id), "w")
-                # determine output coordinates at regular intervals (=step) and y-axes of the particles
+                # determine the output coordinates at regular intervals (=step), y-axes of the particles, and the MOTL angles
                 for i in range(n_points):
                         # output coordinates
                         while not (dist_from_top[slice_i] <= i*step < dist_from_top[slice_i+1]):
@@ -618,10 +616,9 @@ def save_coordinates(xyz, centers, volname, params):
                         coords_all.append(global_coord)
                         #f.write(" ".join(map(str, global_coord))+"\n")
                         if i > 0:
-                                # y-axes
+                                # y-axes (Using polarity=1 here. Polarity is applied later!)
                                 yaxis = global_coord - coords_all[-2]
                                 yaxes_all.append(yaxis)
-                                #fy.write(",".join(map(str, yaxis))+"\n")
                                 # initial motive list
                                 prev_local_coord = np.array(xyz[filament_id][slice_i])
                                 next_local_coord = np.array(xyz[filament_id][slice_i+1])
@@ -636,30 +633,28 @@ def save_coordinates(xyz, centers, volname, params):
                                 zaxis = zaxis / np.linalg.norm(zaxis)
                                 mat = np.array([xaxis, yaxis, zaxis])
                                 rot = Rotation.from_dcm(mat)
-                                motl = rot.as_euler("zyx")/np.pi*180
+                                motl = rot.as_euler("ZXZ")/np.pi*180
                                 motl_all.append(motl)
-                                #fm.write(",".join(map(str, motl))+"\n")
                 yaxes_all.append(yaxis)
                 motl_all.append(motl)
-                #fy.write(",".join(map(str, yaxis))+"\n")
-                #fm.write(",".join(map(str, motl))+"\n")
-                #f.close()
-                #fy.close()
-                #fm.close()
+        yaxes_all = np.array(yaxes_all) * params["polarity"] # apply polarity
         f_name = "%s.filament_%s.coords.txt"%(volname, params["classify"])
         fy_name = "%s.filament_%s.RotAxes.txt"%(volname, params["classify"])
-        fm_name = "%s.filament_%s.SlicerAngles.txt"%(volname, params["classify"])
+        fm_name = "%s.filament_%s.MOTL.csv"%(volname, params["classify"])
         print " -> coordinates are written in %s"%f_name
-        print " -> RotAxes are written in %s"%fy_name
-        print " -> initial Slicer Angles are written in %s"%fm_name
+        print " -> RotAxes are written in %s (using polarity=%d)"%(fy_name, params["polarity"])
+        print " -> initial MOTL angles (ZXZ rotation) are written in %s"%fm_name
         f = open(f_name, "w")
         fy = open(fy_name, "w")
         fm = open(fm_name, "w")
+        fm.write("CCC,reserved,reserved,pIndex,wedgeWT,NA,NA,NA,NA,NA,xOffset,yOffset,zOffset,NA,NA,reserved,EulerZ(1),EulerZ(3),EulerX(2),reserved,CREATED WITH %s\n"%sys.argv[0])
         print "Total number of points: %d"%(len(coords_all))
         for i in range(len(coords_all)):
                 f.write(" ".join(map(str, coords_all[i]))+"\n")
                 fy.write(",".join(map(str, yaxes_all[i]))+"\n")
-                fm.write(",".join(map(str, motl_all[i]))+"\n")
+                angles = motl_all[i]
+                motl = "1,0,0,%d,0,0,0,0,0,0,0,0,0,0,0,0,%f,%f,%f,0\n"%(i+1,angles[0],angles[1],angles[2])
+                fm.write(motl)
         f.close()
         fy.close()
         fm.close()
