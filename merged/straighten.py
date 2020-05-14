@@ -567,6 +567,7 @@ def classify_filaments(xyz, K, k, params):
         save_indices = res[:, 1]
         save_indices = map(int, save_indices)
         print " -> filament %s will be saved ..."%(",".join(map(str, save_indices)))
+        print " -> the number of saved filaments is %d (out of %d)"%(len(save_indices), len(pred))
         saved = {}
         for save_index in save_indices:
                 saved[save_index] = xyz[save_index]
@@ -614,16 +615,36 @@ def save_coordinates(xyz, centers, volname, params):
                         global_coord = prev_global_coord + (next_global_coord-prev_global_coord) * l/delta
                         global_coord *= BIN # make sure to multiply binning factor to make the coordinates global
                         coords_all.append(global_coord)
-                        #f.write(" ".join(map(str, global_coord))+"\n")
                         if i > 0:
                                 # y-axes (Using polarity=1 here. Polarity is applied later!)
                                 yaxis = global_coord - coords_all[-2]
                                 yaxes_all.append(yaxis)
                                 # initial motive list
+                                yaxis = np.array(yaxis)
+                                y = yaxis / np.linalg.norm(yaxis)
+                                x1 = -y[0]
+                                y0, y1, y2 = y
+                                a = 1 + y0**2 / y2**2
+                                b = 2*x1*y0*y1 / y2**2
+                                c = x1**2 + x1**2 * y1**2 / y2**2 - 1
+                                x0 = (-b+np.sqrt(b**2 - 4*a*c))/(2*a)
+                                x2 = -1. / y2 * (x0*y0 + x1*y1)
+                                x = np.array([x0, x1, x2])
+                                z = np.cross(x, y)
+                                mat = np.array([x, y, z])
+                                rot1 = Rotation.from_dcm(mat)
                                 prev_local_coord = np.array(xyz[filament_id][slice_i])
                                 next_local_coord = np.array(xyz[filament_id][slice_i+1])
                                 local_coord = prev_local_coord + (next_local_coord-prev_local_coord) * l/delta
+                                already_applied_rot = np.arctan2(x[1], x[0])
                                 y, x, z = local_coord
+                                angle_rot = -np.arctan2(y, x)
+                                angle = already_applied_rot # align in tomogram
+                                angle += angle_rot
+                                rot2 = Rotation.from_euler("yxy", np.array([angle, 0, 0]))
+                                rot3 = rot2 * rot1
+                                motl = rot3.as_euler("ZXZ") / np.pi * 180
+                                """
                                 xaxis_inplane = -np.array([x*100, y*100, 0])
                                 yaxis = np.array(yaxis)
                                 xaxis = xaxis_inplane - np.dot(xaxis_inplane, yaxis)/np.linalg.norm(yaxis)**2 * yaxis
@@ -634,6 +655,7 @@ def save_coordinates(xyz, centers, volname, params):
                                 mat = np.array([xaxis, yaxis, zaxis])
                                 rot = Rotation.from_dcm(mat)
                                 motl = rot.as_euler("ZXZ")/np.pi*180
+                                """
                                 motl_all.append(motl)
                 yaxes_all.append(yaxis)
                 motl_all.append(motl)
@@ -653,7 +675,7 @@ def save_coordinates(xyz, centers, volname, params):
                 f.write(" ".join(map(str, coords_all[i]))+"\n")
                 fy.write(",".join(map(str, yaxes_all[i]))+"\n")
                 angles = motl_all[i]
-                motl = "1,0,0,%d,0,0,0,0,0,0,0,0,0,0,0,0,%f,%f,%f,0\n"%(i+1,angles[0],angles[1],angles[2])
+                motl = "1,0,0,%d,0,0,0,0,0,0,0,0,0,0,0,0,%f,%f,%f,0\n"%(i+1,-angles[0],-angles[2],-angles[1])
                 fm.write(motl)
         f.close()
         fy.close()
